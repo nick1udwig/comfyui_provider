@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::Address as AlloyAddress;
@@ -21,8 +22,8 @@ wit_bindgen::generate!({
     },
 });
 
-const DEFAULT_COMFYUI_HOST: &str = "10.3.104.223";
-const DEFAULT_COMFYUI_PORT: u16 = 5000;
+const DEFAULT_COMFYUI_HOST: &str = "localhost";
+const DEFAULT_COMFYUI_PORT: u16 = 8188;
 const DEFAULT_COMFYUI_CLIENT_ID: u32 = 0;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -197,17 +198,6 @@ impl State {
     }
 }
 
-// fn is_expected_channel_id(
-//     state: &State,
-//     channel_id: &u32,
-// ) -> anyhow::Result<bool> {
-//     let Some(ref current_channel_id) = state.ws_channel_id else {
-//         return Err(anyhow::anyhow!("no ws channel set"));
-//     };
-//
-//     Ok(channel_id == current_channel_id)
-// }
-
 fn parse_connection_string(connection_string: &str) -> (String, String) {
     let mut account_name = String::new();
     let mut account_key = String::new();
@@ -292,31 +282,16 @@ fn serve_job(
 ) -> anyhow::Result<()> {
     state.is_ready = false;
 
-    // connect to comfyui via WS
-    let url = format!(
-        "ws://{}:{}/ws?clientId={}",
-        state.comfyui_host,
-        state.comfyui_port,
-        state.comfyui_client_id,
-    );
-    http::open_ws_connection(
-        url,
-        None,
-        state.comfyui_client_id.clone(),
-    )?;
-
     // queue prompt
     let url = format!("http://{}:{}/prompt", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
     let prompt = serde_json::json!({"prompt": prompt, "client_id": state.comfyui_client_id});
-    println!("{:?}", prompt);
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
     let queue_response = http::send_request_await_response(
         http::Method::POST,
         url,
         Some(headers),
-        //None,
         5,
         serde_json::to_vec(&prompt)?,
     )?;
@@ -328,119 +303,78 @@ fn serve_job(
     }
     let queue_response: serde_json::Value = serde_json::from_slice(&queue_response.body())?;
     let prompt_id = queue_response["prompt_id"].clone();
-
-    // wait until done executing
-    let mut qr_seen = false;
-    loop {
-        let message = await_message()?;
-        let result = handle_message(&our, &message, state, workflows_dir, images_dir);
-        if result.is_ok() {
-            continue;
-        }
-        if !message.is_request() {
-            continue;
-        }
-        let source = message.source();
-        if source != &Address::new(our.node(), ("http_client", "distro", "sys")) {
-            continue;
-        }
-        match serde_json::from_slice(message.body())? {
-            http::HttpClientRequest::WebSocketPush { channel_id, message_type } => {
-                if message_type == http::WsMessageType::Text {
-                    let json: serde_json::Value = serde_json::from_slice(
-                        &get_blob().unwrap().bytes
-                    )?;
-                    println!("{:?}", json);
-                    if json["type"] == "executing" {
-                        let data = json["data"].clone();
-                        if data.get("node").is_none() && data["prompt_id"] == prompt_id {
-                            println!("done!");
-                            break;
-                        }
-                    }
-                    if json["type"] == "status" {
-                        if json["data"]["status"]["exec_info"]["queue_remaining"] == 0 {
-                            if qr_seen {
-                                println!("done");
-                                break;
-                            } else {
-                                qr_seen = true;
-                            }
-                        }
-                    }
-                }
-            }
-            http::HttpClientRequest::WebSocketClose { channel_id } => {}
-        }
-    }
-
-    // get images
     let serde_json::Value::String(prompt_id) = queue_response["prompt_id"].clone() else {
         panic!("");
     };
+
+    // wait until done executing
+    let mut history = serde_json::Map::new();
     let url = format!("http://{}:{}/history/{prompt_id}", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
-    let history_response = http::send_request_await_response(
-        http::Method::GET,
-        url,
-        None,
-        10,
-        vec![],
-    )?;
-    if !history_response.status().is_success() {
-        return Err(anyhow::anyhow!("couldn't fetch history"));
+    loop {
+        let history_response = http::send_request_await_response(
+            http::Method::GET,
+            url.clone(),
+            None,
+            5,
+            vec![],
+        )?;
+        if !history_response.status().is_success() {
+            return Err(anyhow::anyhow!("couldn't fetch history"));
+        }
+        let history_response: serde_json::Value = serde_json::from_slice(&history_response.body())?;
+        let serde_json::Value::Object(history_response) = history_response.clone() else {
+            return Err(anyhow::anyhow!("/history response not a json object: {:?}", history_response));
+        };
+        if !history_response.is_empty() {
+            history = history_response.clone();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1)); // TODO: allow setting time
     }
-    let history_response: serde_json::Value = serde_json::from_slice(&history_response.body())?;
-    let serde_json::Value::Object(history_response) = history_response.clone() else {
-    //let serde_json::Value::Object(history_response) = history_response["outputs"].clone() else {
-        return Err(anyhow::anyhow!("/history response not a json object: {:?}", history_response));
+
+    // get images
+    let serde_json::Value::Object(history) = history[&prompt_id]["outputs"].clone() else {
+        return Err(anyhow::anyhow!("/history response not a json object: {:?}", history));
     };
     let mut output_images = HashMap::new();
 
-    for (k, v) in history_response.iter() {
-        let serde_json::Value::Object(v) = v else {
-            panic!("");
+    for (node_id, node_output) in history.iter() {
+        let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
+            continue;
         };
-        let v = v["outputs"].clone();
-        let serde_json::Value::Object(v) = v else {
-            panic!("");
-        };
-        for (node_id, node_output) in v.iter() {
-        //for (node_id, node_output) in history_response.iter() {
-            let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
+        let mut node_output_images = Vec::new();
+        for image in images.iter() {
+            let serde_json::Value::Object(image) = image else {
                 continue;
             };
-            let mut node_output_images = Vec::new();
-            for image in images.iter() {
-                let serde_json::Value::Object(image) = image else {
-                    continue;
-                };
-                let json = serde_json::json!({
-                    "filename": image["filename"],
-                    "subfolder": image["subfolder"],
-                    "type": image["type"],
-                });
-                let vars = serde_qs::to_string(&json)?;
-                println!("{}\n{:?}", json, vars);
-                let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
-                let Ok(url) = url::Url::parse(&url) else {
-                    continue;
-                };
-                let view_response = http::send_request_await_response(
-                    http::Method::GET,
-                    url,
-                    None,
-                    5,
-                    vec![],
-                )?;
-                if !view_response.status().is_success() {
-                    println!("couldn't fetch view");
-                    continue;
-                }
-                node_output_images.push(view_response.body().clone());
+            let json = serde_json::json!({
+                "filename": image["filename"],
+                "subfolder": image["subfolder"],
+                "type": image["type"],
+            });
+            let vars = serde_qs::to_string(&json)?;
+            let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
+            let Ok(url) = url::Url::parse(&url) else {
+                continue;
+            };
+            //let view_response = http::send_request_await_response(
+            let view_response = send_request_await_response(
+                http::Method::GET,
+                url,
+                None,
+                5,
+                vec![],
+                false,
+                //true,
+            )?;
+            if !view_response.status().is_success() {
+                println!("couldn't fetch view");
+                continue;
             }
-            output_images.insert(node_id.clone(), node_output_images);
+            node_output_images.push(view_response.body().clone());
         }
+        output_images.insert(node_id.clone(), node_output_images);
     }
 
     // upload image(s)
@@ -450,14 +384,148 @@ fn serve_job(
     let image_name = format!("{}.jpg", image_id);
     let content_type = "images/jpeg";  // TODO
     if !state.azure_connect_string.is_empty() && !state.azure_container_name.is_empty() {
-        send_to_azure(&image_name, image, content_type, state)?;
+        send_to_azure(&image_name, image.clone(), content_type, state)?;
     } else {
         let image_path = format!("{}/{}", images_dir, image_name);
         let file = vfs::open_file(&image_path, true, None)?;
         file.write(&image)?;
     }
 
+    state.is_ready = true;
+    let signature = Ok(0);  // TODO
+    let address = Address::new(
+        state.on_chain_state.routers[0].clone(),
+        state.router_process.clone().unwrap(),
+    );
+    Response::new()
+        .body(serde_json::to_vec(&MemberResponse::ServeJob { job_id, signature })?)
+        .blob_bytes(image)
+        .send()?;
+    let address = Address::new(
+        state.on_chain_state.routers[0].clone(),
+        state.router_process.clone().unwrap(),
+    );
+    Request::to(address)
+        .body(serde_json::to_vec(&MemberRequest::SetIsReady { is_ready: true })?)
+        .send()?;
+
+
     Ok(())
+}
+
+pub fn open_ws_connection(
+    url: String,
+    headers: Option<HashMap<String, String>>,
+    channel_id: u32,
+) -> std::result::Result<(), http::HttpClientError> {
+    let Ok(Ok(Message::Response { body, .. })) =
+        Request::to(("our", "http_client", "distro", "sys"))
+            .body(
+                serde_json::to_vec(&http::HttpClientAction::WebSocketOpen {
+                    url: url.clone(),
+                    headers: headers.unwrap_or(HashMap::new()),
+                    channel_id,
+                })
+                .unwrap(),
+            )
+            .inherit(false)
+            .send_and_await_response(5)
+    else {
+        return Err(http::HttpClientError::WsOpenFailed { url });
+    };
+    match serde_json::from_slice(&body) {
+        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        _ => Err(http::HttpClientError::WsOpenFailed { url }),
+    }
+}
+
+pub fn close_ws_connection(channel_id: u32) -> std::result::Result<(), http::HttpClientError> {
+    let Ok(Ok(Message::Response { body, .. })) =
+        Request::to(("our", "http_client", "distro", "sys"))
+            .body(
+                serde_json::json!(http::HttpClientAction::WebSocketClose { channel_id })
+                    .to_string()
+                    .as_bytes()
+                    .to_vec(),
+            )
+            .inherit(false)
+            .send_and_await_response(5)
+    else {
+        return Err(http::HttpClientError::WsCloseFailed { channel_id });
+    };
+    match serde_json::from_slice(&body) {
+        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        _ => Err(http::HttpClientError::WsCloseFailed { channel_id }),
+    }
+}
+
+pub fn send_request_await_response(
+    method: http::Method,
+    url: url::Url,
+    headers: Option<HashMap<String, String>>,
+    timeout: u64,
+    body: Vec<u8>,
+    inherit: bool,
+) -> std::result::Result<http::Response<Vec<u8>>, http::HttpClientError> {
+    let res = Request::to(("our", "http_client", "distro", "sys"))
+        .body(
+            serde_json::to_vec(&http::HttpClientAction::Http(http::OutgoingHttpRequest {
+                method: method.to_string(),
+                version: None,
+                url: url.to_string(),
+                headers: headers.unwrap_or_default(),
+            }))
+            .map_err(|e| http::HttpClientError::BadRequest {
+                req: format!("{e:?}"),
+            })?,
+        )
+        .blob_bytes(body)
+        .inherit(inherit)
+        .send_and_await_response(timeout)
+        .map_err(|e| http::HttpClientError::RequestFailed { error: format!("{}", e) } )?;
+    let Ok(Message::Response { body, .. }) = res else {
+        return Err(http::HttpClientError::RequestFailed {
+            error: "http_client timed out".to_string(),
+        });
+    };
+    let resp = match serde_json::from_slice::<
+        std::result::Result<http::HttpClientResponse, http::HttpClientError>,
+    >(&body)
+    {
+        Ok(Ok(http::HttpClientResponse::Http(resp))) => resp,
+        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => {
+            return Err(http::HttpClientError::RequestFailed {
+                error: "http_client gave unexpected response".to_string(),
+            })
+        }
+        Ok(Err(e)) => return Err(e),
+        Err(e) => {
+            return Err(http::HttpClientError::RequestFailed {
+                error: format!("http_client gave invalid response: {e:?}"),
+            })
+        }
+    };
+    let mut http_response = http::Response::builder()
+        .status(http::StatusCode::from_u16(resp.status).unwrap_or_default());
+    let headers = http_response.headers_mut().unwrap();
+    for (key, value) in &resp.headers {
+        let Ok(key) = http::header::HeaderName::from_str(key) else {
+            return Err(http::HttpClientError::RequestFailed {
+                error: format!("http_client gave invalid header key: {key}"),
+            });
+        };
+        let Ok(value) = http::header::HeaderValue::from_str(value) else {
+            return Err(http::HttpClientError::RequestFailed {
+                error: format!("http_client gave invalid header value: {value}"),
+            });
+        };
+        headers.insert(key, value);
+    }
+    Ok(http_response
+        .body(get_blob().unwrap_or_default().bytes)
+        .unwrap())
 }
 
 fn fetch_chain_state(state: &mut State) -> anyhow::Result<()> {
@@ -572,7 +640,7 @@ fn handle_member_request(
         }
         MemberRequest::ServeJob { job_id, seed, workflow, prompt } => {
             if !is_ready {
-                Response::new()
+                Response::new() // TODO
                     .body(serde_json::to_vec(&MemberResponse::ServeJob {
                         job_id,
                         signature: Err("not serving job: not ready".into()),
@@ -601,19 +669,9 @@ fn handle_member_request(
             let serde_json::Value::String(seed_node) = workflow["prompts"]["seed_node"].clone() else {
                 panic!("");
             };
-            //let positive_node = workflow["prompts"]["prompt_node"].to_string();
-            //let negative_node = workflow["prompts"]["negative_node"].to_string();
-            //let seed_node = workflow["prompts"]["seed_node"].to_string();
-            //println!("{}", seed_node);
-            //println!("{:?}", workflow);
-            //let mut full_seed_node = workflow["workflow"][seed_node.clone()].clone();
-            //println!("{}", full_seed_node);
-            //full_seed_node["inputs"]["seed"] = seed.clone().into();
-            //println!("{}", full_seed_node);
             let mut prompt = workflow["workflow"].clone();
             prompt[positive_node]["inputs"]["text"] = positive_prompt;
             prompt[negative_node]["inputs"]["text"] = negative_prompt;
-            //prompt[seed_node] = full_seed_node.clone();
             prompt[seed_node]["inputs"]["seed"] = seed.into();
             serve_job(our, message, state, workflows_dir, images_dir, job_id, prompt)?;
         }
@@ -680,8 +738,6 @@ fn handle_message(
 call_init!(init);
 fn init(our: Address) {
     println!("{our}: begin");
-
-    let _ = http::close_ws_connection(DEFAULT_COMFYUI_CLIENT_ID);
 
     let workflows_dir = vfs::create_drive(our.package_id(), "workflows", None).unwrap();
     let images_dir = vfs::create_drive(our.package_id(), "images", None).unwrap();
