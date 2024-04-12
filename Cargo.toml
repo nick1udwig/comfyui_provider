@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "comfyui_provider",
+    "admin",
+]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

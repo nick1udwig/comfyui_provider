@@ -1,0 +1,19 @@
+[
+    {
+        "process_name": "comfyui_provider",
+        "process_wasm_path": "/comfyui_provider.wasm",
+        "on_exit": "Restart",
+        "request_networking": true,
+        "request_capabilities": [
+            "http_client:distro:sys",
+            "net:distro:sys",
+            "vfs:distro:sys"
+        ],
+        "grant_capabilities": [
+            "http_client:distro:sys",
+            "terminal:terminal:sys",
+            "vfs:distro:sys"
+        ],
+        "public": false
+    }
+]
