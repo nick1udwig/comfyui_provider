@@ -408,7 +408,7 @@ fn serve_job(
     Request::to(address)
         .body(serde_json::to_vec(&MemberRequest::SetIsReady { is_ready: true })?)
         .send()?;
-
+    state.save()?;
 
     Ok(())
 }
@@ -615,6 +615,7 @@ fn handle_admin_request(
                 .send()?;
         }
     }
+    state.save()?;
     Ok(())
 }
 
@@ -705,6 +706,7 @@ fn handle_sequencer_response(state: &mut State) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("fetch_chain_state got wrong Response back"));
     };
     state.on_chain_state = new_dao_state.clone();
+    state.save()?;
     Ok(())
 }
 
@@ -741,7 +743,7 @@ fn init(our: Address) {
 
     let workflows_dir = vfs::create_drive(our.package_id(), "workflows", None).unwrap();
     let images_dir = vfs::create_drive(our.package_id(), "images", None).unwrap();
-    let mut state = State::default();
+    let mut state = State::load();
 
     loop {
         let message = await_message();
