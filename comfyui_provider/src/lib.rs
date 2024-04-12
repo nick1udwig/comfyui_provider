@@ -21,7 +21,7 @@ wit_bindgen::generate!({
     },
 });
 
-const DEFAULT_COMFYUI_HOST: &str = "localhost";
+const DEFAULT_COMFYUI_HOST: &str = "10.3.104.223";
 const DEFAULT_COMFYUI_PORT: u16 = 5000;
 const DEFAULT_COMFYUI_CLIENT_ID: u32 = 0;
 
@@ -309,6 +309,7 @@ fn serve_job(
     let url = format!("http://{}:{}/prompt", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
     let prompt = serde_json::json!({"prompt": prompt, "client_id": state.comfyui_client_id});
+    println!("{:?}", prompt);
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
     let queue_response = http::send_request_await_response(
@@ -329,6 +330,7 @@ fn serve_job(
     let prompt_id = queue_response["prompt_id"].clone();
 
     // wait until done executing
+    let mut qr_seen = false;
     loop {
         let message = await_message()?;
         let result = handle_message(&our, &message, state, workflows_dir, images_dir);
@@ -356,6 +358,16 @@ fn serve_job(
                             break;
                         }
                     }
+                    if json["type"] == "status" {
+                        if json["data"]["status"]["exec_info"]["queue_remaining"] == 0 {
+                            if qr_seen {
+                                println!("done");
+                                break;
+                            } else {
+                                qr_seen = true;
+                            }
+                        }
+                    }
                 }
             }
             http::HttpClientRequest::WebSocketClose { channel_id } => {}
@@ -363,56 +375,72 @@ fn serve_job(
     }
 
     // get images
-    let url = format!("http://{}:{}/history?{prompt_id}", state.comfyui_host, state.comfyui_port);
+    let serde_json::Value::String(prompt_id) = queue_response["prompt_id"].clone() else {
+        panic!("");
+    };
+    let url = format!("http://{}:{}/history/{prompt_id}", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
     let history_response = http::send_request_await_response(
         http::Method::GET,
         url,
         None,
-        5,
+        10,
         vec![],
     )?;
     if !history_response.status().is_success() {
         return Err(anyhow::anyhow!("couldn't fetch history"));
     }
     let history_response: serde_json::Value = serde_json::from_slice(&history_response.body())?;
-    let serde_json::Value::Object(history_response) = history_response["outputs"].clone() else {
-        return Err(anyhow::anyhow!("/history response not a json object"));
+    let serde_json::Value::Object(history_response) = history_response.clone() else {
+    //let serde_json::Value::Object(history_response) = history_response["outputs"].clone() else {
+        return Err(anyhow::anyhow!("/history response not a json object: {:?}", history_response));
     };
     let mut output_images = HashMap::new();
-    for (node_id, node_output) in history_response.iter() {
-        let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
-            continue;
+
+    for (k, v) in history_response.iter() {
+        let serde_json::Value::Object(v) = v else {
+            panic!("");
         };
-        let mut node_output_images = Vec::new();
-        for image in images.iter() {
-            let serde_json::Value::Object(image) = image else {
+        let v = v["outputs"].clone();
+        let serde_json::Value::Object(v) = v else {
+            panic!("");
+        };
+        for (node_id, node_output) in v.iter() {
+        //for (node_id, node_output) in history_response.iter() {
+            let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
                 continue;
             };
-            let json = serde_json::json!({
-                "filename": image["filename"],
-                "subfolder": image["subfolder"],
-                "type": image["type"],
-            }).to_string();
-            let vars = urlencoding::encode(&json);
-            let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
-            let Ok(url) = url::Url::parse(&url) else {
-                continue;
-            };
-            let view_response = http::send_request_await_response(
-                http::Method::GET,
-                url,
-                None,
-                5,
-                vec![],
-            )?;
-            if !view_response.status().is_success() {
-                println!("couldn't fetch history");
-                continue;
+            let mut node_output_images = Vec::new();
+            for image in images.iter() {
+                let serde_json::Value::Object(image) = image else {
+                    continue;
+                };
+                let json = serde_json::json!({
+                    "filename": image["filename"],
+                    "subfolder": image["subfolder"],
+                    "type": image["type"],
+                });
+                let vars = serde_qs::to_string(&json)?;
+                println!("{}\n{:?}", json, vars);
+                let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
+                let Ok(url) = url::Url::parse(&url) else {
+                    continue;
+                };
+                let view_response = http::send_request_await_response(
+                    http::Method::GET,
+                    url,
+                    None,
+                    5,
+                    vec![],
+                )?;
+                if !view_response.status().is_success() {
+                    println!("couldn't fetch view");
+                    continue;
+                }
+                node_output_images.push(view_response.body().clone());
             }
-            node_output_images.push(view_response.body().clone());
+            output_images.insert(node_id.clone(), node_output_images);
         }
-        output_images.insert(node_id, node_output_images);
     }
 
     // upload image(s)
@@ -556,17 +584,37 @@ fn handle_member_request(
             let workflow = vfs::open_file(&workflow, false, None)?
                 .read()?;
             let workflow: serde_json::Value = serde_json::from_slice(&workflow)?;
-            let pre_prompt = workflow["prompts"]["pre_prompt"].clone();
-            let post_prompt = workflow["prompts"]["post_prompt"].clone();
+            let serde_json::Value::String(pre_prompt) = workflow["prompts"]["pre_prompt"].clone() else {
+                panic!("");
+            };
+            let serde_json::Value::String(post_prompt) = workflow["prompts"]["post_prompt"].clone() else {
+                panic!("");
+            };
             let positive_prompt = serde_json::json!(format!("{pre_prompt} {prompt} {post_prompt}"));
             let negative_prompt = workflow["prompts"]["negative_prompt"].clone();
-            let positive_node = workflow["prompts"]["positive_node"].to_string();
-            let negative_node = workflow["prompts"]["negative_node"].to_string();
-            let seed_node = workflow["prompts"]["seed_node"].to_string();
+            let serde_json::Value::String(positive_node) = workflow["prompts"]["prompt_node"].clone() else {
+                panic!("");
+            };
+            let serde_json::Value::String(negative_node) = workflow["prompts"]["negative_node"].clone() else {
+                panic!("");
+            };
+            let serde_json::Value::String(seed_node) = workflow["prompts"]["seed_node"].clone() else {
+                panic!("");
+            };
+            //let positive_node = workflow["prompts"]["prompt_node"].to_string();
+            //let negative_node = workflow["prompts"]["negative_node"].to_string();
+            //let seed_node = workflow["prompts"]["seed_node"].to_string();
+            //println!("{}", seed_node);
+            //println!("{:?}", workflow);
+            //let mut full_seed_node = workflow["workflow"][seed_node.clone()].clone();
+            //println!("{}", full_seed_node);
+            //full_seed_node["inputs"]["seed"] = seed.clone().into();
+            //println!("{}", full_seed_node);
             let mut prompt = workflow["workflow"].clone();
             prompt[positive_node]["inputs"]["text"] = positive_prompt;
             prompt[negative_node]["inputs"]["text"] = negative_prompt;
-            prompt[seed_node]["inputs"]["seed"] = serde_json::json!(seed);
+            //prompt[seed_node] = full_seed_node.clone();
+            prompt[seed_node]["inputs"]["seed"] = seed.into();
             serve_job(our, message, state, workflows_dir, images_dir, job_id, prompt)?;
         }
         MemberRequest::SetIsReady { .. } => {
