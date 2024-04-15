@@ -49,6 +49,7 @@ enum MemberRequest {
     SetIsReady { is_ready: bool },
     /// Router querying if member is ready to serve.
     QueryReady,
+    JobTaken { job_id: u64 },
     ServeJob { job_id: u64, seed: u32, workflow: String, prompt: String },
 }
 
@@ -57,6 +58,8 @@ enum MemberResponse {
     SetIsReady,
     /// Member Response to router: is_ready.
     QueryReady { is_ready: bool },
+    /// Ack
+    JobTaken,
     /// Job result.
     /// Signature in body; result in LazyLoadBlob.
     ServeJob { job_id: u64, signature: Result<u64, String> },  // ?
@@ -639,6 +642,12 @@ fn handle_member_request(
                 .body(serde_json::to_vec(&MemberResponse::QueryReady { is_ready })?)
                 .send()?;
         }
+        MemberRequest::JobTaken { .. } => {
+            // Ack
+            Response::new()
+                .body(serde_json::to_vec(&MemberResponse::JobTaken)?)
+                .send()?;
+        }
         MemberRequest::ServeJob { job_id, seed, workflow, prompt } => {
             if !is_ready {
                 Response::new() // TODO
@@ -691,7 +700,7 @@ fn handle_member_response(
 ) -> anyhow::Result<()> {
     match serde_json::from_slice(message.body())? {
         MemberResponse::SetIsReady | MemberResponse::QueryReady { .. } => {}
-        MemberResponse::ServeJob { job_id, signature } => {
+        MemberResponse::ServeJob { .. } | MemberResponse::JobTaken => {
             return Err(anyhow::anyhow!("unexpected MemberResponse"));
         }
     }
