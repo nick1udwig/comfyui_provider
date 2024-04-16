@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use kinode_process_lib::{
-    await_next_message_body, call_init, println, Address, ProcessId, Request,
+    await_next_message_body, call_init, println, Address, Request,
 };
 
 wit_bindgen::generate!({

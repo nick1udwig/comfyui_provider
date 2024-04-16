@@ -1,14 +1,10 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::Address as AlloyAddress;
-use base64::encode;
-use hmac_sha256::HMAC;
 use serde::{Deserialize, Serialize};
 
 use kinode_process_lib::{http, vfs};
-use kinode_process_lib::kernel_types::MessageType;
 use kinode_process_lib::{
     await_message, call_init, get_blob, get_typed_state, println, set_state,
     Address, Message, LazyLoadBlob, ProcessId, Request, Response,
@@ -32,7 +28,6 @@ enum AdminRequest {
     SetRollupSequencer { address: String },
     SetIsReady { is_ready: bool },
     SetComfyUi { host: String, port: u16, client_id: u32 },
-    SetAzure { connect_string: String, container_name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,7 +36,6 @@ enum AdminResponse {
     SetRollupSequencer { err: Option<String> },
     SetIsReady,
     SetComfyUi,
-    SetAzure,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,8 +100,6 @@ struct State {
     comfyui_host: String,
     comfyui_port: u16,
     comfyui_client_id: u32,
-    azure_connect_string: String,
-    azure_container_name: String,
     is_ready: bool,
 }
 
@@ -165,8 +157,6 @@ impl Default for State {
             comfyui_host: DEFAULT_COMFYUI_HOST.to_string(),
             comfyui_port: DEFAULT_COMFYUI_PORT,
             comfyui_client_id: DEFAULT_COMFYUI_CLIENT_ID,
-            azure_connect_string: String::new(),
-            azure_container_name: String::new(),
             is_ready: false,
         }
     }
@@ -201,84 +191,11 @@ impl State {
     }
 }
 
-fn parse_connection_string(connection_string: &str) -> (String, String) {
-    let mut account_name = String::new();
-    let mut account_key = String::new();
-
-    for part in connection_string.split(';') {
-        let mut parts = part.split('=');
-        match parts.next() {
-            Some("AccountName") => account_name = parts.next().unwrap_or_default().to_string(),
-            Some("AccountKey") => account_key = parts.next().unwrap_or_default().to_string(),
-            _ => {}
-        }
-    }
-
-    (account_name, account_key)
-}
-
-fn send_to_azure(
-    blob_name: &str,
-    data: Vec<u8>,
-    content_type: &str,
-    state: &State,
-) -> anyhow::Result<()> {
-    let connect_string = &state.azure_connect_string;
-    let container_name = &state.azure_container_name;
-
-    let (storage_account, storage_key) = parse_connection_string(connect_string);
-
-    let url = format!(
-        "https://{}.blob.core.windows.net/{}/{}",
-        storage_account, container_name, blob_name
-    );
-    let url = url::Url::parse(&url)?;
-
-    let date = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
-    let date_header = format!("{}", date);
-
-    let string_to_sign = format!(
-        "PUT\n\n\n{}\n\n{}\n\n\n\n\n\n\nx-ms-date:{}\nx-ms-version:2020-04-08\n/{}/{}\ncomp:block\nblockid:{}",
-        data.len(),
-        content_type,
-        date_header,
-        storage_account,
-        container_name,
-        encode("blockid")
-    );
-
-    let signature = encode(&HMAC::mac(string_to_sign.as_bytes(), &base64::decode(&storage_key)?));
-
-    let authorization_header = format!("SharedKey {}:{}", storage_account, signature);
-
-    let mut headers: HashMap<String, String> = HashMap::new();
-    headers.insert("x-ms-date".into(), date_header);
-    headers.insert("x-ms-version".into(), "2020-04-08".into());
-    headers.insert("Authorization".into(), authorization_header);
-    headers.insert("CONTENT_TYPE".into(), content_type.into());
-    headers.insert("CONTENT_LENGTH".into(), format!("{}", data.len()));
-
-    let response = http::send_request_await_response(
-        http::Method::PUT,
-        url,
-        Some(headers),
-        5, // TODO
-        data,
-    )?;
-
-    println!("Response: {:?}", response);
-
-    Ok(())
-}
-
 fn serve_job(
-    our: &Address,
-    message: &Message,
+    _our: &Address,
+    _message: &Message,
     state: &mut State,
-    workflows_dir: &str,
+    _workflows_dir: &str,
     images_dir: &str,
     job_id: u64,
     prompt: serde_json::Value,
@@ -305,7 +222,6 @@ fn serve_job(
         return Err(anyhow::anyhow!("couldn't queue"));
     }
     let queue_response: serde_json::Value = serde_json::from_slice(&queue_response.body())?;
-    let prompt_id = queue_response["prompt_id"].clone();
     let serde_json::Value::String(prompt_id) = queue_response["prompt_id"].clone() else {
         panic!("");
     };
@@ -385,21 +301,12 @@ fn serve_job(
 
     let image_id = uuid::Uuid::new_v4();
     let image_name = format!("{}.jpg", image_id);
-    let content_type = "images/jpeg";  // TODO
-    if !state.azure_connect_string.is_empty() && !state.azure_container_name.is_empty() {
-        send_to_azure(&image_name, image.clone(), content_type, state)?;
-    } else {
-        let image_path = format!("{}/{}", images_dir, image_name);
-        let file = vfs::open_file(&image_path, true, None)?;
-        file.write(&image)?;
-    }
+    let image_path = format!("{}/{}", images_dir, image_name);
+    let file = vfs::open_file(&image_path, true, None)?;
+    file.write(&image)?;
 
     state.is_ready = true;
     let signature = Ok(0);  // TODO
-    let address = Address::new(
-        state.on_chain_state.routers[0].clone(),
-        state.router_process.clone().unwrap(),
-    );
     Response::new()
         .body(serde_json::to_vec(&MemberResponse::ServeJob { job_id, signature })?)
         .blob_bytes(image)
@@ -531,17 +438,17 @@ pub fn send_request_await_response(
         .unwrap())
 }
 
-fn fetch_chain_state(state: &mut State) -> anyhow::Result<()> {
-    let Some(rollup_sequencer) = state.rollup_sequencer.clone() else {
-        return Err(anyhow::anyhow!("fetch_chain_state rollup_sequencer must be set before chain state can be fetched"));
-    };
-    Request::to(rollup_sequencer)  // TODO
-        .body(vec![])
-        .blob_bytes(serde_json::to_vec(&SequencerRequest::Read(ReadRequest::All))?)
-        .expects_response(5) // TODO
-        .send()?;
-    Ok(())
-}
+// fn fetch_chain_state(state: &mut State) -> anyhow::Result<()> {
+//     let Some(rollup_sequencer) = state.rollup_sequencer.clone() else {
+//         return Err(anyhow::anyhow!("fetch_chain_state rollup_sequencer must be set before chain state can be fetched"));
+//     };
+//     Request::to(rollup_sequencer)  // TODO
+//         .body(vec![])
+//         .blob_bytes(serde_json::to_vec(&SequencerRequest::Read(ReadRequest::All))?)
+//         .expects_response(5) // TODO
+//         .send()?;
+//     Ok(())
+// }
 
 fn await_chain_state(state: &mut State) -> anyhow::Result<()> {
     let Some(rollup_sequencer) = state.rollup_sequencer.clone() else {
@@ -608,13 +515,6 @@ fn handle_admin_request(
             state.comfyui_client_id = client_id;
             Response::new()
                 .body(serde_json::to_vec(&AdminResponse::SetComfyUi)?)
-                .send()?;
-        }
-        AdminRequest::SetAzure { connect_string, container_name } => {
-            state.azure_connect_string = connect_string;
-            state.azure_container_name = container_name;
-            Response::new()
-                .body(serde_json::to_vec(&AdminResponse::SetAzure)?)
                 .send()?;
         }
     }
@@ -694,9 +594,7 @@ fn handle_member_request(
 
 
 fn handle_member_response(
-    our: &Address,
     message: &Message,
-    state: &mut State,
 ) -> anyhow::Result<()> {
     match serde_json::from_slice(message.body())? {
         MemberResponse::SetIsReady | MemberResponse::QueryReady { .. } => {}
@@ -741,7 +639,7 @@ fn handle_message(
     if handle_sequencer_response(state).is_ok() {
         return Ok(());
     };
-    handle_member_response(our, &message, state)?;
+    handle_member_response(&message)?;
 
     Ok(())
 }
