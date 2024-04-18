@@ -914,10 +914,10 @@ fn handle_member_request(
                 .send()?;
         }
         MemberRequest::ServeJob { job_id, ref seed, ref workflow, ref parameters } => {
+            Response::new() // TODO
+                .body(serde_json::to_vec(&MemberResponse::ServeJob)?)
+                .send()?;
             if !is_ready {
-                Response::new() // TODO
-                    .body(serde_json::to_vec(&MemberResponse::ServeJob)?)
-                    .send()?;
                 return Err(anyhow::anyhow!("not serving job: not ready"));
             }
             let workflow = format!("{workflows_dir}/{workflow}.json");
