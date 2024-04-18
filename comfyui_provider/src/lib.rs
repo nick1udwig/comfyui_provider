@@ -101,7 +101,6 @@ struct State {
     router_process: Option<ProcessId>,
     rollup_sequencer: Option<Address>,
     on_chain_state: OnChainDaoState,
-    ws_channel_id: Option<u32>,
     comfyui_host: String,
     comfyui_port: u16,
     comfyui_client_id: u32,
@@ -158,7 +157,6 @@ impl Default for State {
             router_process: None,
             rollup_sequencer: None,
             on_chain_state: OnChainDaoState::default(),
-            ws_channel_id: None,
             comfyui_host: DEFAULT_COMFYUI_HOST.to_string(),
             comfyui_port: DEFAULT_COMFYUI_PORT,
             comfyui_client_id: DEFAULT_COMFYUI_CLIENT_ID,
@@ -220,7 +218,7 @@ pub struct Workflow {
     pub description: String,
     pub config: Config,
     pub nodes_config: NodesConfig,
-    pub prompts: Prompts,
+    //pub prompts: Prompts,
     pub nodes: Nodes,
 }
 
@@ -258,8 +256,7 @@ type Nodes = HashMap<String, Node>;
 pub struct Node {
     pub inputs: HashMap<String, serde_json::Value>,
     pub class_type: String,
-    #[serde(rename = "_meta")]
-    pub meta: Meta,
+    pub _meta: Meta,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -421,11 +418,7 @@ fn build_nodes(
     data_dir: &str,
     seed: &u32,
 ) -> anyhow::Result<Nodes> {
-    //println!("{parameters}");
-    //let parameters: String = serde_json::from_str(parameters)?;
-    println!("{parameters}");
     let req: GenerateImageRequest = serde_json::from_str(&parameters)?;
-    println!("{req:?}");
     let mut nodes = workflow_config.nodes;
 
     let (width, height) = resolve_dimensions(&req.quality, &req.aspect_ratio, data_dir)?;
@@ -491,7 +484,7 @@ fn build_nodes(
                 .insert("strength_model".into(), character.clone());
             nodes.insert(
                 workflow_config.nodes_config.character_node,
-                styler_node,
+                character_node,
             );
         }
     }
@@ -598,7 +591,10 @@ fn serve_job(
     // queue prompt
     let url = format!("http://{}:{}/prompt", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
-    let prompt = serde_json::json!({"prompt": nodes, "client_id": state.comfyui_client_id});
+    let prompt = serde_json::json!({
+        "prompt": nodes,
+        "client_id": format!("{}", state.comfyui_client_id),
+    });
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
     let queue_response = http::send_request_await_response(
@@ -619,47 +615,39 @@ fn serve_job(
         panic!("");
     };
 
-    //// wait until done executing
-    //let mut history = serde_json::Map::new();
-    //let url = format!("http://{}:{}/history/{prompt_id}", state.comfyui_host, state.comfyui_port);
-    //let url = url::Url::parse(&url)?;
     let address = Address::new(
         state.on_chain_state.routers[0].clone(),
         state.router_process.clone().unwrap(),
     );
+    let mut current_node = String::new();
     loop {
         let message = await_message()?;
         let result = handle_message(&our, &message, state, workflows_dir, data_dir, images_dir);
-        if result.is_ok() {
-            continue;
-        }
-        if !message.is_request() {
-            continue;
-        }
         let source = message.source();
-        if source != &Address::new(our.node(), ("http_client", "distro", "sys")) {
+        if result.is_ok()
+        || !message.is_request()
+        || source != &Address::new(our.node(), ("http_client", "distro", "sys")) {
             continue;
         }
-        let mut current_node = String::new();
         match serde_json::from_slice(message.body())? {
             http::HttpClientRequest::WebSocketPush { channel_id, message_type } => {
                 if message_type == http::WsMessageType::Text {
                     let blob_bytes = &get_blob().unwrap().bytes;
                     let update: ComfyUpdate = serde_json::from_slice(&blob_bytes)?;
+                    //println!("text: {:?}", serde_json::from_slice::<serde_json::Value>(&blob_bytes));
                     if update.type_ == "executing" {
                         let update: ComfyUpdateExecuting = serde_json::from_slice(&blob_bytes)?;
                         if update.data.prompt_id.unwrap_or("".into()) == prompt_id {
                             if update.data.node.is_none() {
                                 break;
                             } else {
+                                //println!("current_node: {:?}", update.data.node);
                                 current_node = update.data.node.unwrap();
                             }
                         }
                     } else if update.type_ == "status" {
-                        println!("status: {:?}", serde_json::from_slice::<serde_json::Value>(&blob_bytes));
                     }
                 } else if message_type == http::WsMessageType::Binary {
-                    println!("got binary WS");
                     // TODO: inherit instead? Then client will need to strip header
                     let is_final = current_node == image_done_node_id;
                     let signature = Ok(0);  // TODO
@@ -673,74 +661,18 @@ fn serve_job(
                     }
                 }
             }
-            http::HttpClientRequest::WebSocketClose { channel_id } => {}
+            http::HttpClientRequest::WebSocketClose { channel_id } => {
+                //println!("got ws close");
+            }
         }
     }
 
     http::close_ws_connection(state.comfyui_client_id.clone())?;
 
-    //// get images
-    //let serde_json::Value::Object(history) = history[&prompt_id]["outputs"].clone() else {
-    //    return Err(anyhow::anyhow!("/history response not a json object: {:?}", history));
-    //};
-    //let mut output_images = HashMap::new();
-
-    //for (node_id, node_output) in history.iter() {
-    //    let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
-    //        continue;
-    //    };
-    //    let mut node_output_images = Vec::new();
-    //    for image in images.iter() {
-    //        let serde_json::Value::Object(image) = image else {
-    //            continue;
-    //        };
-    //        let json = serde_json::json!({
-    //            "filename": image["filename"],
-    //            "subfolder": image["subfolder"],
-    //            "type": image["type"],
-    //        });
-    //        let vars = serde_qs::to_string(&json)?;
-    //        let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
-    //        let Ok(url) = url::Url::parse(&url) else {
-    //            continue;
-    //        };
-    //        //let view_response = http::send_request_await_response(
-    //        let view_response = send_request_await_response(
-    //            http::Method::GET,
-    //            url,
-    //            None,
-    //            5,
-    //            vec![],
-    //            false,
-    //            //true,
-    //        )?;
-    //        if !view_response.status().is_success() {
-    //            println!("couldn't fetch view");
-    //            continue;
-    //        }
-    //        node_output_images.push(view_response.body().clone());
-    //    }
-    //    output_images.insert(node_id.clone(), node_output_images);
-    //}
-
-    //// upload image(s)
-    //let image = output_images.values().next().unwrap()[0].clone();
-
-    //let image_id = uuid::Uuid::new_v4();
-    //let image_name = format!("{}.jpg", image_id);
-    //let image_path = format!("{}/{}", images_dir, image_name);
-    //let file = vfs::open_file(&image_path, true, None)?;
-    //file.write(&image)?;
-
-    //state.is_ready = true;
-    //let signature = Ok(0);  // TODO
-    //Response::new()
-    //    .body(serde_json::to_vec(&MemberResponse::ServeJob { job_id, signature })?)
-    //    .blob_bytes(image)
-    //    .send()?;
     Request::to(address)
         .body(serde_json::to_vec(&MemberRequest::SetIsReady { is_ready: true })?)
         .send()?;
+    state.is_ready = true;
     state.save()?;
 
     Ok(())
@@ -955,8 +887,17 @@ fn handle_member_request(
 ) -> anyhow::Result<()> {
     let source = message.source();
     if !state.on_chain_state.routers.contains(&source.node().to_string()) {
+        if source.node() == our.node() {
+            // handle extra WS messages;
+            // these are being removed (they are sent post-close);
+            // TODO: remove this after fix is in
+            if let Ok(_req) = serde_json::from_slice::<http::HttpClientRequest>(message.body()) {
+                return Err(anyhow::anyhow!("this is a hack"));
+            }
+        }
         return Err(anyhow::anyhow!(
-            "only routers can send member Requests; rejecting from {source:?}\n{state:?}"
+            "only routers can send member Requests; rejecting from {source:?}\n{:?}",
+            serde_json::from_slice::<serde_json::Value>(message.body()),
         ));
     }
     let is_ready = state.is_ready.clone();
@@ -985,6 +926,7 @@ fn handle_member_request(
             let base_workflow: Workflow = serde_json::from_slice(&base_workflow)?;
             let image_done_node_id = base_workflow.nodes_config.websocket_node.clone();
             let nodes = build_nodes(base_workflow, parameters, data_dir, seed)?;
+            state.comfyui_client_id = seed.clone();  // TODO
             serve_job(
                 our,
                 message,
@@ -1084,6 +1026,13 @@ fn init(our: Address) {
         ) {
             Ok(()) => {}
             Err(e) => {
+                // handle extra WS messages;
+                // these are being removed (they are sent post-close);
+                // TODO: remove this after fix is in
+                if e.to_string() == "this is a hack".to_string() {
+                    continue;
+                }
+
                 println!("{}: error: {:?}", our.process(), e);
             }
         };
