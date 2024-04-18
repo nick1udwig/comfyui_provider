@@ -1,0 +1,176 @@
+[
+  {
+    "id": "photorealistic",
+    "name": "Photorealistic",
+    "checkpoint": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors",
+    "model": {
+      "lora_name": "more_details.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "sampler_name": "dpmpp_sde_gpu",
+    "scheduler": "karras",
+    "prompt": "score_9, score_8_up, score_7_up ,score_6_up, 8k, masterpiece, photorealistic",
+    "negative_prompt": "BeyondSDXLv3, ugly, bad art, bad quality, low quality, bad text, unreadable text",
+    "cfg_scale": {
+      "min": 1.5,
+      "max": 3.0
+    },
+    "steps": {
+      "min": 4,
+      "max": 6,
+      "quality_map": {
+        "512": 4.0,
+        "768": 5.0,
+        "1024": 6.0
+      }
+    },
+    "detailer": {
+      "more_details": 1.0
+    }
+  },
+  {
+    "id": "pixel-art",
+    "name": "Pixel Art",
+    "checkpoint": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors",
+    "model": {
+      "lora_name": "pixel-art-xl-v1.1.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.2,
+        "1024": 1.4
+      }
+    },
+    "sampler_name": "dpmpp_sde_gpu",
+    "scheduler": "karras",
+    "prompt": "pixelart, very high detail, masterpiece, high-res fix",
+    "negative_prompt": "BeyondSDXLv3, ugly, bad art, bad quality, low quality, low quality, low quality",
+    "cfg_scale": {
+      "min": 1.5,
+      "max": 3.0
+    },
+    "steps": {
+      "min": 4,
+      "max": 6,
+      "quality_map": {
+        "512": 4.0,
+        "768": 5.0,
+        "1024": 6.0
+      }
+    },
+    "detailer": {
+      "more_details": 0.0
+    }
+  },
+  {
+    "id": "ms-paint",
+    "name": "MS Paint",
+    "checkpoint": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors",
+    "model": {
+      "lora_name": "SDXL_MSPaint_Portrait.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.2,
+        "1024": 1.4
+      }
+    },
+    "sampler_name": "dpmpp_sde_gpu",
+    "scheduler": "karras",
+    "prompt": "MSPaint drawing of",
+    "negative_prompt": "realistic, artistic, random text",
+    "cfg_scale": {
+      "min": 2.0,
+      "max": 3.0
+    },
+    "steps": {
+      "min": 4,
+      "max": 6,
+      "quality_map": {
+        "512": 4.0,
+        "768": 5.0,
+        "1024": 6.0
+      }
+    },
+    "detailer": {
+      "more_details": 0.0
+    },
+    "character_model": {
+      "pepe": 0.7
+    }
+  },
+  {
+    "id": "cinematic",
+    "name": "Cinematic",
+    "checkpoint": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors",
+    "model": {
+      "lora_name": "JuggerCineXL2.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.2,
+        "1024": 1.4
+      }
+    },
+    "sampler_name": "dpmpp_sde_gpu",
+    "scheduler": "karras",
+    "prompt": "film still, score_9, score_8_up, score_7_up ,score_6_up, 8k, masterpiece, cinematic lighting",
+    "negative_prompt": "BeyondSDXLv3, ugly, bad art, bad quality, low quality",
+    "cfg_scale": {
+      "min": 2.0,
+      "max": 3.0
+    },
+    "steps": {
+      "min": 4,
+      "max": 6,
+      "quality_map": {
+        "512": 4.0,
+        "768": 5.0,
+        "1024": 6.0
+      }
+    },
+    "detailer": {
+      "more_details": 0.0
+    },
+    "character_model": {
+      "pepe": 1.0
+    }
+  },
+  {
+    "id": "hand-drawn",
+    "name": "Hand Drawn",
+    "checkpoint": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors",
+    "model": {
+      "lora_name": "SDXL_MSPaint_Portrait.safetensors",
+      "strength_model": {
+        "512": 0.0,
+        "768": 0.0,
+        "1024": 0.0
+      }
+    },
+    "sampler_name": "dpmpp_sde_gpu",
+    "scheduler": "karras",
+    "prompt": "hand drawn",
+    "negative_prompt": "realistic",
+    "cfg_scale": {
+      "min": 2.0,
+      "max": 3.0
+    },
+    "steps": {
+      "min": 4,
+      "max": 6,
+      "quality_map": {
+        "512": 4.0,
+        "768": 5.0,
+        "1024": 6.0
+      }
+    },
+    "detailer": {
+      "more_details": 0.0
+    },
+    "character_model": {
+      "pepe": 1.0
+    }
+  }
+]

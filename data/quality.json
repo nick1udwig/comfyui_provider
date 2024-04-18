@@ -1,0 +1,30 @@
+{
+  "fast": {
+    "square": {
+      "width": 512,
+      "height": 512
+    },
+    "portrait": {
+      "width": 512,
+      "height": 768
+    },
+    "landscape": {
+      "width": 768,
+      "height": 512
+    }
+  },
+  "quality": {
+    "square": {
+      "width": 1024,
+      "height": 1024
+    },
+    "portrait": {
+      "width": 768,
+      "height": 1024
+    },
+    "landscape": {
+      "width": 1024,
+      "height": 768
+    }
+  }
+}

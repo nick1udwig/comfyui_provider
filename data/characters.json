@@ -1,0 +1,126 @@
+[
+  {
+    "id": "normal",
+    "name": "Normal",
+    "model": {
+      "lora_name": "xl_more_art-full_v1.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "image": "",
+    "prompt": "",
+    "negative_prompt": "",
+    "trigger_words": []
+  },
+  {
+    "id": "pepe",
+    "name": "Pepe",
+    "model": {
+      "lora_name": "DD-pepe-v2.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "image": "",
+    "prompt": "pepe",
+    "negative_prompt": "red eyes, blotches, bad skin detailing, skin blemishes",
+    "trigger_words": [
+      "pepe",
+      "pepe the frog"
+    ]
+  },
+  {
+    "id": "soyjak",
+    "name": "Soyjak",
+    "model": {
+      "lora_name": "soyjak_XL.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "prompt": "soyjak drawing of",
+    "negative_prompt": "",
+    "trigger_words": [
+      "soyjak",
+      "soyjak drawing"
+    ]
+  },
+  {
+    "id": "wojak",
+    "name": "Wojak",
+    "model": {
+      "lora_name": "wojak_SDXL.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "prompt": "wojak",
+    "negative_prompt": "",
+    "trigger_words": [
+      "wojak",
+      "crying wojak"
+    ]
+  },
+  {
+    "id": "tradwife",
+    "name": "Tradwife",
+    "model": {
+      "lora_name": "wojak_SDXL.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "prompt": "tradwife",
+    "negative_prompt": "",
+    "trigger_words": [
+      "tradwife"
+    ]
+  },
+  {
+    "id": "doomer",
+    "name": "Doomer",
+    "model": {
+      "lora_name": "wojak_SDXL.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.2
+      }
+    },
+    "prompt": "doomer",
+    "negative_prompt": "",
+    "trigger_words": [
+      "doomer"
+    ]
+  },
+  {
+    "id": "apu-apustaja",
+    "name": "Apu Apustaja",
+    "model": {
+      "lora_name": "apu_apustaja_xl.safetensors",
+      "strength_model": {
+        "512": 1.0,
+        "768": 1.0,
+        "1024": 1.0
+      }
+    },
+    "prompt": "apu apustaja",
+    "negative_prompt": "realistic",
+    "trigger_words": [
+      "apu apustaja",
+      "apustaja",
+      "apu"
+    ]
+  }
+]

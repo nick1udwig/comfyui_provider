@@ -44,7 +44,10 @@ enum MemberRequest {
     /// Router querying if member is ready to serve.
     QueryReady,
     JobTaken { job_id: u64 },
-    ServeJob { job_id: u64, seed: u32, workflow: String, prompt: String },
+    ServeJob { job_id: u64, seed: u32, workflow: String, parameters: String },
+    ///// Job result.
+    ///// Signature in body; result in LazyLoadBlob.
+    JobUpdate { job_id: u64, is_final: bool, signature: Result<u64, String> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,9 +57,11 @@ enum MemberResponse {
     QueryReady { is_ready: bool },
     /// Ack
     JobTaken,
-    /// Job result.
-    /// Signature in body; result in LazyLoadBlob.
-    ServeJob { job_id: u64, signature: Result<u64, String> },  // ?
+    //ServeJob { job_id: u64, signature: Result<u64, String> },  // ?
+    /// Ack
+    ServeJob,
+    /// Ack
+    JobUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,21 +196,409 @@ impl State {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ComfyUpdate {
+    #[serde(rename = "type")]
+    type_: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ComfyUpdateExecuting {
+    data: ComfyUpdateExecutingData,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ComfyUpdateExecutingData {
+    prompt_id: Option<String>,
+    node: Option<String>,
+    output: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Workflow {
+    pub name: String,
+    pub description: String,
+    pub config: Config,
+    pub nodes_config: NodesConfig,
+    pub prompts: Prompts,
+    pub nodes: Nodes,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Config {
+    pub aspect_ratio: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodesConfig {
+    pub prompt_node: String,
+    pub negative_node: String,
+    pub seed_node: String,
+    pub websocket_node: String,
+    pub sampler_node: String,
+    pub latent_image_node: String,
+    pub checkpoint_node: String,
+    pub cfg_scale_node: String,
+    pub character_node: String,
+    pub detailer_node: String,
+    pub styler_node: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Prompts {
+    pub pre_prompt: String,
+    pub prompt_must_include: String,
+    pub post_prompt: String,
+    pub negative_prompt: String,
+}
+
+type Nodes = HashMap<String, Node>;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Node {
+    pub inputs: HashMap<String, serde_json::Value>,
+    pub class_type: String,
+    #[serde(rename = "_meta")]
+    pub meta: Meta,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Meta {
+    pub title: String,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct GenerateImageRequest {
+    pub quality: GenerationQuality,
+    pub aspect_ratio: AspectRatios,
+    pub workflow: String,
+    pub user_id: String,
+    pub negative_prompt: String,
+    pub positive_prompt: String,
+    pub cfg_scale: serde_json::Value,
+    pub character: GenerateImageRequestCharacter,
+    pub styler: GenerateImageRequestStyler,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct GenerateImageRequestCharacter {
+    pub id: String,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct GenerateImageRequestStyler {
+    pub id: String,
+}
+
+// Define a struct to hold dimensions.
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+struct Dimension {
+    width: u32,
+    height: u32,
+}
+
+// Define the type alias for nested HashMaps.
+type DimensionMap = HashMap<GenerationQuality, HashMap<AspectRatios, Dimension>>;
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Hash, Eq)]
+pub enum GenerationQuality {
+    #[serde(rename = "fast")]
+    Fast,
+    #[serde(rename = "quality")]
+    Quality,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Hash, Eq)]
+pub enum AspectRatios {
+    #[serde(rename = "square")]
+    Square,
+    #[serde(rename = "portrait")]
+    Portrait,
+    #[serde(rename = "landscape")]
+    Landscape,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ModelDetails {
+    lora_name: String,
+    strength_model: HashMap<String, f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Character {
+    id: String,
+    name: String,
+    model: ModelDetails,
+    //image: String,
+    prompt: String,
+    negative_prompt: String,
+    trigger_words: Vec<String>,
+}
+
+type Characters = Vec<Character>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Styler {
+    id: String,
+    name: String,
+    checkpoint: String,
+    model: ModelDetails,
+    sampler_name: String,
+    scheduler: String,
+    prompt: String,
+    negative_prompt: String,
+    cfg_scale: CfgScale,
+    steps: StepDetails,
+    detailer: Detailer,
+    // Include this field if necessary as seen in some JSON entries
+    character_model: Option<HashMap<String, serde_json::Value>>,
+}
+
+type Stylers = Vec<Styler>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CfgScale {
+    min: f64,
+    max: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StepDetails {
+    min: i32,
+    max: i32,
+    quality_map: HashMap<String, f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Detailer {
+    more_details: f64,
+}
+
+fn resolve_dimensions(q: &GenerationQuality, r: &AspectRatios, data_dir: &str) -> anyhow::Result<(u32, u32)> {
+    let quality = format!("{data_dir}/quality.json");
+    let quality = vfs::open_file(&quality, false, None)?
+        .read()?;
+    let quality: DimensionMap = serde_json::from_slice(&quality)?;
+    let dimensions = quality
+        .get(q)
+        .and_then(|m| m.get(r))
+        .ok_or_else(|| anyhow::anyhow!(""))?;
+    Ok((dimensions.width, dimensions.height))
+}
+
+fn get_character(character_id: &str, data_dir: &str) -> anyhow::Result<Character> {
+    let characters = format!("{data_dir}/characters.json");
+    let characters = vfs::open_file(&characters, false, None)?
+        .read()?;
+    let characters: Characters = serde_json::from_slice(&characters)?;
+    for character in characters {
+        if character.id != character_id {
+            continue;
+        }
+        return Ok(character)
+    }
+    return Err(anyhow::anyhow!("didn't find character with id {character_id}"))
+}
+
+fn get_styler(styler_id: &str, data_dir: &str) -> anyhow::Result<Styler> {
+    let stylers = format!("{data_dir}/stylers.json");
+    let stylers = vfs::open_file(&stylers, false, None)?
+        .read()?;
+    let stylers: Stylers = serde_json::from_slice(&stylers)?;
+    for styler in stylers {
+        if styler.id != styler_id {
+            continue;
+        }
+        return Ok(styler)
+    }
+    return Err(anyhow::anyhow!("didn't find styler with id {styler_id}"))
+}
+
+/// Business logic specific to the task & workflow served by this provider.
+fn build_nodes(
+    workflow_config: Workflow,
+    parameters: &str,
+    data_dir: &str,
+    seed: &u32,
+) -> anyhow::Result<Nodes> {
+    //println!("{parameters}");
+    //let parameters: String = serde_json::from_str(parameters)?;
+    println!("{parameters}");
+    let req: GenerateImageRequest = serde_json::from_str(&parameters)?;
+    println!("{req:?}");
+    let mut nodes = workflow_config.nodes;
+
+    let (width, height) = resolve_dimensions(&req.quality, &req.aspect_ratio, data_dir)?;
+    let client_id: String = req.user_id.replace("user:", "").replace("_", "-");
+
+    // character setup
+    let character_config = get_character(&req.character.id, data_dir)?;
+    //let Ok(character_config) = db::character_by_id(&req.character.id).await else {
+    //    return Err(()); //HttpResponse::BadRequest().finish();
+    //};
+    let lora_name = character_config.model.lora_name;
+    let strength = character_config.model.strength_model.get("1024").unwrap();
+    let mut character_node = nodes
+        .get(&workflow_config.nodes_config.character_node)
+        .unwrap()
+        .clone();
+    character_node.inputs.insert("lora_name".into(), serde_json::json!(lora_name));
+    character_node
+        .inputs
+        .insert("strength_model".into(), serde_json::json!(strength));
+    nodes.insert(
+        workflow_config.nodes_config.character_node.clone(),
+        character_node.clone(),
+    );
+
+    // styler setup
+    let styler_config = get_styler(&req.styler.id, data_dir)?;
+    //let Ok(styler_config) = db::styler_by_id(&req.styler.id).await else {
+    //    return Err(()); //HttpResponse::BadRequest().finish();
+    //};
+    let lora_name = styler_config.model.lora_name;
+    let strength = styler_config.model.strength_model.get("1024").unwrap();
+    let mut styler_node = nodes
+        .get(&workflow_config.nodes_config.styler_node)
+        .unwrap()
+        .clone();
+    styler_node.inputs.insert("lora_name".into(), serde_json::json!(lora_name));
+    styler_node
+        .inputs
+        .insert("strength_model".into(), serde_json::json!(strength));
+    nodes.insert(
+        workflow_config.nodes_config.styler_node,
+        styler_node.clone(),
+    );
+    // step count based on quality
+    let mut sampler_node = nodes
+        .get(&workflow_config.nodes_config.sampler_node)
+        .unwrap()
+        .clone();
+    sampler_node.inputs.insert(
+        "steps".into(),
+        serde_json::json!(styler_config.steps.quality_map.get("1024").unwrap()),
+    );
+    nodes.insert(
+        workflow_config.nodes_config.sampler_node,
+        sampler_node.clone(),
+    );
+    // if style has a strength override for a character, apply it
+    if let Some(char_model) = styler_config.character_model {
+        if let Some(character) = char_model.get(&req.character.id) {
+            character_node
+                .inputs
+                .insert("strength_model".into(), character.clone());
+            nodes.insert(
+                workflow_config.nodes_config.character_node,
+                styler_node,
+            );
+        }
+    }
+
+    // user prompt setup
+    let positive_prompt = format!(
+        "{}, {}, {}",
+        styler_config.prompt,
+        character_config.prompt,
+        req.positive_prompt,
+    );
+    let negative_prompt = format!(
+        "{}, {}, nsfw",
+        styler_config.negative_prompt,
+        req.negative_prompt,
+    );
+    let positive_node_name = workflow_config.nodes_config.prompt_node;
+    let negative_node_name = workflow_config.nodes_config.negative_node;
+    let mut pos_node = nodes.get(&positive_node_name).unwrap().clone();
+    pos_node.inputs.insert(
+        "text".into(),
+        serde_json::to_value(positive_prompt.clone()).unwrap(),
+    );
+    nodes.insert(positive_node_name, pos_node);
+    let mut neg_node = nodes.get(&negative_node_name).unwrap().clone();
+    neg_node.inputs.insert(
+        "text".into(),
+        serde_json::to_value(negative_prompt.clone()).unwrap(),
+    );
+    nodes.insert(negative_node_name, neg_node);
+
+    //// store historical prompt
+    //let hp = HistoricalPrompt::new(
+    //    req.workflow.clone(),
+    //    positive_prompt,
+    //    negative_prompt,
+    //    req.user_id.clone(),
+    //);
+    //let Ok(_) = db::save_historical_prompt(&hp).await else {
+    //    return Err(()); //HttpResponse::UnprocessableEntity().finish();
+    //};
+
+    // seed setup
+    let seed_node_id = workflow_config.nodes_config.seed_node;
+    let mut seed_node = nodes.get(&seed_node_id.clone()).unwrap().clone();
+    seed_node
+        .inputs
+        .insert("seed".into(), serde_json::to_value(seed).unwrap());
+    nodes.insert(seed_node_id.clone(), seed_node);
+
+    let mut user_config = serde_json::to_value(req.clone()).unwrap();
+    if let Some(obj) = user_config.as_object_mut() {
+        obj.insert("seed".to_string(), serde_json::to_value(seed).unwrap());
+    }
+
+    // cfg scale setup
+    let cfg_scale_node_name = workflow_config.nodes_config.cfg_scale_node;
+    let mut cfg_node = nodes.get(&cfg_scale_node_name).unwrap().clone();
+    cfg_node
+        .inputs
+        .insert("cfg_scale".into(), req.cfg_scale.clone());
+    nodes.insert(cfg_scale_node_name, cfg_node);
+
+    // aspect ratio setup
+    let latent_image_node_name = workflow_config.nodes_config.latent_image_node;
+    let mut latent_image_node = nodes.get(&latent_image_node_name).unwrap().clone();
+    latent_image_node
+        .inputs
+        .insert("width".into(), serde_json::to_value(width).unwrap());
+    latent_image_node
+        .inputs
+        .insert("height".into(), serde_json::to_value(height).unwrap());
+    nodes.insert(latent_image_node_name, latent_image_node);
+
+    Ok(nodes)
+}
+
 fn serve_job(
-    _our: &Address,
+    our: &Address,
     _message: &Message,
     state: &mut State,
-    _workflows_dir: &str,
+    workflows_dir: &str,
+    data_dir: &str,
     images_dir: &str,
     job_id: u64,
-    prompt: serde_json::Value,
+    nodes: HashMap<String, Node>,
+    image_done_node_id: &str,
 ) -> anyhow::Result<()> {
     state.is_ready = false;
+
+    // connect to comfyui via WS
+    let url = format!(
+        "ws://{}:{}/ws?clientId={}",
+        state.comfyui_host,
+        state.comfyui_port,
+        state.comfyui_client_id,
+    );
+    http::open_ws_connection(
+        url,
+        None,
+        state.comfyui_client_id.clone(),
+    )?;
 
     // queue prompt
     let url = format!("http://{}:{}/prompt", state.comfyui_host, state.comfyui_port);
     let url = url::Url::parse(&url)?;
-    let prompt = serde_json::json!({"prompt": prompt, "client_id": state.comfyui_client_id});
+    let prompt = serde_json::json!({"prompt": nodes, "client_id": state.comfyui_client_id});
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
     let queue_response = http::send_request_await_response(
@@ -226,95 +619,125 @@ fn serve_job(
         panic!("");
     };
 
-    // wait until done executing
-    let mut history = serde_json::Map::new();
-    let url = format!("http://{}:{}/history/{prompt_id}", state.comfyui_host, state.comfyui_port);
-    let url = url::Url::parse(&url)?;
-    loop {
-        let history_response = http::send_request_await_response(
-            http::Method::GET,
-            url.clone(),
-            None,
-            5,
-            vec![],
-        )?;
-        if !history_response.status().is_success() {
-            return Err(anyhow::anyhow!("couldn't fetch history"));
-        }
-        let history_response: serde_json::Value = serde_json::from_slice(&history_response.body())?;
-        let serde_json::Value::Object(history_response) = history_response.clone() else {
-            return Err(anyhow::anyhow!("/history response not a json object: {:?}", history_response));
-        };
-        if !history_response.is_empty() {
-            history = history_response.clone();
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1)); // TODO: allow setting time
-    }
-
-    // get images
-    let serde_json::Value::Object(history) = history[&prompt_id]["outputs"].clone() else {
-        return Err(anyhow::anyhow!("/history response not a json object: {:?}", history));
-    };
-    let mut output_images = HashMap::new();
-
-    for (node_id, node_output) in history.iter() {
-        let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
-            continue;
-        };
-        let mut node_output_images = Vec::new();
-        for image in images.iter() {
-            let serde_json::Value::Object(image) = image else {
-                continue;
-            };
-            let json = serde_json::json!({
-                "filename": image["filename"],
-                "subfolder": image["subfolder"],
-                "type": image["type"],
-            });
-            let vars = serde_qs::to_string(&json)?;
-            let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
-            let Ok(url) = url::Url::parse(&url) else {
-                continue;
-            };
-            //let view_response = http::send_request_await_response(
-            let view_response = send_request_await_response(
-                http::Method::GET,
-                url,
-                None,
-                5,
-                vec![],
-                false,
-                //true,
-            )?;
-            if !view_response.status().is_success() {
-                println!("couldn't fetch view");
-                continue;
-            }
-            node_output_images.push(view_response.body().clone());
-        }
-        output_images.insert(node_id.clone(), node_output_images);
-    }
-
-    // upload image(s)
-    let image = output_images.values().next().unwrap()[0].clone();
-
-    let image_id = uuid::Uuid::new_v4();
-    let image_name = format!("{}.jpg", image_id);
-    let image_path = format!("{}/{}", images_dir, image_name);
-    let file = vfs::open_file(&image_path, true, None)?;
-    file.write(&image)?;
-
-    state.is_ready = true;
-    let signature = Ok(0);  // TODO
-    Response::new()
-        .body(serde_json::to_vec(&MemberResponse::ServeJob { job_id, signature })?)
-        .blob_bytes(image)
-        .send()?;
+    //// wait until done executing
+    //let mut history = serde_json::Map::new();
+    //let url = format!("http://{}:{}/history/{prompt_id}", state.comfyui_host, state.comfyui_port);
+    //let url = url::Url::parse(&url)?;
     let address = Address::new(
         state.on_chain_state.routers[0].clone(),
         state.router_process.clone().unwrap(),
     );
+    loop {
+        let message = await_message()?;
+        let result = handle_message(&our, &message, state, workflows_dir, data_dir, images_dir);
+        if result.is_ok() {
+            continue;
+        }
+        if !message.is_request() {
+            continue;
+        }
+        let source = message.source();
+        if source != &Address::new(our.node(), ("http_client", "distro", "sys")) {
+            continue;
+        }
+        let mut current_node = String::new();
+        match serde_json::from_slice(message.body())? {
+            http::HttpClientRequest::WebSocketPush { channel_id, message_type } => {
+                if message_type == http::WsMessageType::Text {
+                    let blob_bytes = &get_blob().unwrap().bytes;
+                    let update: ComfyUpdate = serde_json::from_slice(&blob_bytes)?;
+                    if update.type_ == "executing" {
+                        let update: ComfyUpdateExecuting = serde_json::from_slice(&blob_bytes)?;
+                        if update.data.prompt_id.unwrap_or("".into()) == prompt_id {
+                            if update.data.node.is_none() {
+                                break;
+                            } else {
+                                current_node = update.data.node.unwrap();
+                            }
+                        }
+                    } else if update.type_ == "status" {
+                        println!("status: {:?}", serde_json::from_slice::<serde_json::Value>(&blob_bytes));
+                    }
+                } else if message_type == http::WsMessageType::Binary {
+                    println!("got binary WS");
+                    // TODO: inherit instead? Then client will need to strip header
+                    let is_final = current_node == image_done_node_id;
+                    let signature = Ok(0);  // TODO
+                    let blob_bytes = &get_blob().unwrap().bytes;
+                    Request::to(address.clone())
+                        .body(serde_json::to_vec(&MemberRequest::JobUpdate { job_id, is_final, signature })?)
+                        .blob_bytes(blob_bytes[8..].to_vec())
+                        .send()?;
+                    if is_final {
+                        break;
+                    }
+                }
+            }
+            http::HttpClientRequest::WebSocketClose { channel_id } => {}
+        }
+    }
+
+    http::close_ws_connection(state.comfyui_client_id.clone())?;
+
+    //// get images
+    //let serde_json::Value::Object(history) = history[&prompt_id]["outputs"].clone() else {
+    //    return Err(anyhow::anyhow!("/history response not a json object: {:?}", history));
+    //};
+    //let mut output_images = HashMap::new();
+
+    //for (node_id, node_output) in history.iter() {
+    //    let Some(serde_json::Value::Array(images)) = node_output.get("images") else {
+    //        continue;
+    //    };
+    //    let mut node_output_images = Vec::new();
+    //    for image in images.iter() {
+    //        let serde_json::Value::Object(image) = image else {
+    //            continue;
+    //        };
+    //        let json = serde_json::json!({
+    //            "filename": image["filename"],
+    //            "subfolder": image["subfolder"],
+    //            "type": image["type"],
+    //        });
+    //        let vars = serde_qs::to_string(&json)?;
+    //        let url = format!("http://{}:{}/view?{vars}", state.comfyui_host, state.comfyui_port);
+    //        let Ok(url) = url::Url::parse(&url) else {
+    //            continue;
+    //        };
+    //        //let view_response = http::send_request_await_response(
+    //        let view_response = send_request_await_response(
+    //            http::Method::GET,
+    //            url,
+    //            None,
+    //            5,
+    //            vec![],
+    //            false,
+    //            //true,
+    //        )?;
+    //        if !view_response.status().is_success() {
+    //            println!("couldn't fetch view");
+    //            continue;
+    //        }
+    //        node_output_images.push(view_response.body().clone());
+    //    }
+    //    output_images.insert(node_id.clone(), node_output_images);
+    //}
+
+    //// upload image(s)
+    //let image = output_images.values().next().unwrap()[0].clone();
+
+    //let image_id = uuid::Uuid::new_v4();
+    //let image_name = format!("{}.jpg", image_id);
+    //let image_path = format!("{}/{}", images_dir, image_name);
+    //let file = vfs::open_file(&image_path, true, None)?;
+    //file.write(&image)?;
+
+    //state.is_ready = true;
+    //let signature = Ok(0);  // TODO
+    //Response::new()
+    //    .body(serde_json::to_vec(&MemberResponse::ServeJob { job_id, signature })?)
+    //    .blob_bytes(image)
+    //    .send()?;
     Request::to(address)
         .body(serde_json::to_vec(&MemberRequest::SetIsReady { is_ready: true })?)
         .send()?;
@@ -527,6 +950,7 @@ fn handle_member_request(
     message: &Message,
     state: &mut State,
     workflows_dir: &str,
+    data_dir: &str,
     images_dir: &str,
 ) -> anyhow::Result<()> {
     let source = message.source();
@@ -548,44 +972,32 @@ fn handle_member_request(
                 .body(serde_json::to_vec(&MemberResponse::JobTaken)?)
                 .send()?;
         }
-        MemberRequest::ServeJob { job_id, seed, workflow, prompt } => {
+        MemberRequest::ServeJob { job_id, ref seed, ref workflow, ref parameters } => {
             if !is_ready {
                 Response::new() // TODO
-                    .body(serde_json::to_vec(&MemberResponse::ServeJob {
-                        job_id,
-                        signature: Err("not serving job: not ready".into()),
-                    })?)
+                    .body(serde_json::to_vec(&MemberResponse::ServeJob)?)
                     .send()?;
                 return Err(anyhow::anyhow!("not serving job: not ready"));
             }
             let workflow = format!("{workflows_dir}/{workflow}.json");
-            let workflow = vfs::open_file(&workflow, false, None)?
+            let base_workflow = vfs::open_file(&workflow, false, None)?
                 .read()?;
-            let workflow: serde_json::Value = serde_json::from_slice(&workflow)?;
-            let serde_json::Value::String(pre_prompt) = workflow["prompts"]["pre_prompt"].clone() else {
-                panic!("");
-            };
-            let serde_json::Value::String(post_prompt) = workflow["prompts"]["post_prompt"].clone() else {
-                panic!("");
-            };
-            let positive_prompt = serde_json::json!(format!("{pre_prompt} {prompt} {post_prompt}"));
-            let negative_prompt = workflow["prompts"]["negative_prompt"].clone();
-            let serde_json::Value::String(positive_node) = workflow["prompts"]["prompt_node"].clone() else {
-                panic!("");
-            };
-            let serde_json::Value::String(negative_node) = workflow["prompts"]["negative_node"].clone() else {
-                panic!("");
-            };
-            let serde_json::Value::String(seed_node) = workflow["prompts"]["seed_node"].clone() else {
-                panic!("");
-            };
-            let mut prompt = workflow["workflow"].clone();
-            prompt[positive_node]["inputs"]["text"] = positive_prompt;
-            prompt[negative_node]["inputs"]["text"] = negative_prompt;
-            prompt[seed_node]["inputs"]["seed"] = seed.into();
-            serve_job(our, message, state, workflows_dir, images_dir, job_id, prompt)?;
+            let base_workflow: Workflow = serde_json::from_slice(&base_workflow)?;
+            let image_done_node_id = base_workflow.nodes_config.websocket_node.clone();
+            let nodes = build_nodes(base_workflow, parameters, data_dir, seed)?;
+            serve_job(
+                our,
+                message,
+                state,
+                workflows_dir,
+                data_dir,
+                images_dir,
+                job_id,
+                nodes,
+                &image_done_node_id,
+            )?;
         }
-        MemberRequest::SetIsReady { .. } => {
+        MemberRequest::SetIsReady { .. } | MemberRequest::JobUpdate { .. } => {
             return Err(anyhow::anyhow!("unexpected MemberRequest"));
         }
     }
@@ -597,7 +1009,7 @@ fn handle_member_response(
     message: &Message,
 ) -> anyhow::Result<()> {
     match serde_json::from_slice(message.body())? {
-        MemberResponse::SetIsReady | MemberResponse::QueryReady { .. } => {}
+        MemberResponse::SetIsReady | MemberResponse::QueryReady { .. } | MemberResponse::JobUpdate => {}
         MemberResponse::ServeJob { .. } | MemberResponse::JobTaken => {
             return Err(anyhow::anyhow!("unexpected MemberResponse"));
         }
@@ -622,6 +1034,7 @@ fn handle_message(
     message: &Message,
     state: &mut State,
     workflows_dir: &str,
+    data_dir: &str,
     images_dir: &str,
 ) -> anyhow::Result<()> {
     if message.is_request() {
@@ -633,7 +1046,7 @@ fn handle_message(
                 "provider package must be set by AdminRequest before accepting other Requests"
             ));
         }
-        return handle_member_request(our, &message, state, workflows_dir, images_dir);
+        return handle_member_request(our, &message, state, workflows_dir, data_dir, images_dir);
     }
 
     if handle_sequencer_response(state).is_ok() {
@@ -646,9 +1059,12 @@ fn handle_message(
 
 call_init!(init);
 fn init(our: Address) {
-    println!("{our}: begin");
+    println!("{}: begin", our.process());
+
+    let _ = http::close_ws_connection(DEFAULT_COMFYUI_CLIENT_ID);
 
     let workflows_dir = vfs::create_drive(our.package_id(), "workflows", None).unwrap();
+    let data_dir = vfs::create_drive(our.package_id(), "data", None).unwrap();
     let images_dir = vfs::create_drive(our.package_id(), "images", None).unwrap();
     let mut state = State::load();
 
@@ -658,7 +1074,14 @@ fn init(our: Address) {
             println!("{}: error: {:?}", our.process(), message);
             continue;
         };
-        match handle_message(&our, &message, &mut state, &workflows_dir, &images_dir) {
+        match handle_message(
+            &our,
+            &message,
+            &mut state,
+            &workflows_dir,
+            &data_dir,
+            &images_dir,
+        ) {
             Ok(()) => {}
             Err(e) => {
                 println!("{}: error: {:?}", our.process(), e);
