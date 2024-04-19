@@ -1,0 +1,18 @@
+[
+  {
+    "id": "more-details",
+    "name": "More Details",
+    "prompt": [
+      "<lora:sd_xl_turbo_lora_v1-128dim:1>",
+      "<lora:sd_xl_turbo_lora_v1-64dim:1>"
+    ],
+    "cfg_scale": {
+      "min": 1.5,
+      "max": 2.5
+    },
+    "steps": {
+      "min": 4,
+      "max": 8
+    }
+  }
+]

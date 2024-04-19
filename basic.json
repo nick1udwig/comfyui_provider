@@ -1,0 +1,241 @@
+{
+  "name": "basic",
+  "description": "the base workflow for generating meme images",
+  "config": {
+    "aspect_ratio": "square"
+  },
+  "nodes_config": {
+    "prompt_node": "4",
+    "negative_node": "5",
+    "seed_node": "21",
+    "websocket_node": "59",
+    "sampler_node": "40",
+    "latent_image_node": "20",
+    "checkpoint_node": "1",
+    "cfg_scale_node": "38",
+    "character_node": "58",
+    "detailer_node": "61",
+    "styler_node": "62"
+  },
+  "prompts": {
+    "pre_prompt": "",
+    "prompt_must_include": "",
+    "post_prompt": "",
+    "negative_prompt": ""
+  },
+  "nodes": {
+    "1": {
+      "inputs": {
+        "ckpt_name": "RealitiesEdgeXLLIGHTNING_LIGHTNING34Step.safetensors"
+      },
+      "class_type": "CheckpointLoaderSimple",
+      "_meta": {
+        "title": "Load Checkpoint"
+      }
+    },
+    "4": {
+      "inputs": {
+        "text": "",
+        "clip": [
+          "62",
+          1
+        ]
+      },
+      "class_type": "CLIPTextEncode",
+      "_meta": {
+        "title": "CLIP Text Encode (Prompt)"
+      }
+    },
+    "5": {
+      "inputs": {
+        "text": "",
+        "clip": [
+          "62",
+          1
+        ]
+      },
+      "class_type": "CLIPTextEncode",
+      "_meta": {
+        "title": "CLIP Text Encode (Negative Prompt)"
+      }
+    },
+    "18": {
+      "inputs": {
+        "samples": [
+          "40",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ]
+      },
+      "class_type": "VAEDecode",
+      "_meta": {
+        "title": "VAE Decode"
+      }
+    },
+    "19": {
+      "inputs": {
+        "images": [
+          "18",
+          0
+        ]
+      },
+      "class_type": "PreviewImage",
+      "_meta": {
+        "title": "Preview Image"
+      }
+    },
+    "20": {
+      "inputs": {
+        "width": 512,
+        "height": 512,
+        "batch_size": 1
+      },
+      "class_type": "EmptyLatentImage",
+      "_meta": {
+        "title": "Empty Latent Image"
+      }
+    },
+    "21": {
+      "inputs": {
+        "seed": 1003380956036472
+      },
+      "class_type": "CR Seed",
+      "_meta": {
+        "title": "🌱 CR Seed"
+      }
+    },
+    "38": {
+      "inputs": {
+        "value": 2
+      },
+      "class_type": "CR Value",
+      "_meta": {
+        "title": "cfg"
+      }
+    },
+    "40": {
+      "inputs": {
+        "add_noise": "enable",
+        "noise_seed": [
+          "21",
+          0
+        ],
+        "steps": 6,
+        "cfg": [
+          "38",
+          0
+        ],
+        "sampler_name": "dpmpp_sde_gpu",
+        "scheduler": "karras",
+        "start_at_step": 0,
+        "end_at_step": 1000,
+        "return_with_leftover_noise": "disable",
+        "model": [
+          "62",
+          0
+        ],
+        "positive": [
+          "4",
+          0
+        ],
+        "negative": [
+          "5",
+          0
+        ],
+        "latent_image": [
+          "20",
+          0
+        ]
+      },
+      "class_type": "KSamplerAdvanced",
+      "_meta": {
+        "title": "KSampler (Advanced)"
+      }
+    },
+    "58": {
+      "inputs": {
+        "lora_name": "DD-pepe-v2.safetensors",
+        "strength_model": 0,
+        "strength_clip": 1,
+        "model": [
+          "1",
+          0
+        ],
+        "clip": [
+          "63",
+          0
+        ]
+      },
+      "class_type": "LoraLoader",
+      "_meta": {
+        "title": "Character LoRA"
+      }
+    },
+    "59": {
+      "inputs": {
+        "images": [
+          "18",
+          0
+        ]
+      },
+      "class_type": "SaveImageWebsocket",
+      "_meta": {
+        "title": "SaveImageWebsocket"
+      }
+    },
+    "61": {
+      "inputs": {
+        "lora_name": "more_details.safetensors",
+        "strength_model": 0,
+        "strength_clip": 1,
+        "model": [
+          "58",
+          0
+        ],
+        "clip": [
+          "58",
+          1
+        ]
+      },
+      "class_type": "LoraLoader",
+      "_meta": {
+        "title": "Detailer LoRA"
+      }
+    },
+    "62": {
+      "inputs": {
+        "lora_name": "SDXL_MSPaint_Portrait.safetensors",
+        "strength_model": 0,
+        "strength_clip": 1,
+        "model": [
+          "61",
+          0
+        ],
+        "clip": [
+          "61",
+          1
+        ]
+      },
+      "class_type": "LoraLoader",
+      "_meta": {
+        "title": "Style LoRA"
+      }
+    },
+    "63": {
+      "inputs": {
+        "stop_at_clip_layer": -2,
+        "clip": [
+          "1",
+          1
+        ]
+      },
+      "class_type": "CLIPSetLastLayer",
+      "_meta": {
+        "title": "CLIP Set Last Layer"
+      }
+    }
+  }
+}
