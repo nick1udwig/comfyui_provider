@@ -33,7 +33,7 @@ git clone https://github.com/nick1udwig/comfyui_provider
 kit bs comfyui_provider -p $PROVIDER_PORT
 mkdir -p vfs/comfyui_provider\:nick1udwig.os/workflows/
 cp comfyui_provider/new.json ${PROVIDER_HOME}/vfs/comfyui_provider\:nick1udwig.os/workflows/
-cp -r data vfs/comfyui_provider\:nick1udwig.os/
+cp -r data ${PROVIDER_HOME}/vfs/comfyui_provider\:nick1udwig.os/
 
 # Setup rollup (rollup.os terminal)
 admin:provider-dao-rollup:nick1udwig.os {"SetRouters": ["ROUTER.os"]}
