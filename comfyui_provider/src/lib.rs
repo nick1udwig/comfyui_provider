@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use alloy_primitives::Address as AlloyAddress;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use kinode_process_lib::{http, vfs};
 use kinode_process_lib::{
@@ -189,6 +190,18 @@ impl State {
             None => State::default(),
         }
     }
+}
+
+#[derive(Error, Debug)]
+enum NotAMatchError {
+    #[error("Match failed")]
+    NotAMatch,
+}
+
+#[derive(Error, Debug)]
+enum ExtraWsMessageError {
+    #[error("Extra WS message after close")]
+    ExtraWsMessage,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -675,121 +688,6 @@ fn serve_job(
     Ok(())
 }
 
-pub fn open_ws_connection(
-    url: String,
-    headers: Option<HashMap<String, String>>,
-    channel_id: u32,
-) -> std::result::Result<(), http::HttpClientError> {
-    let Ok(Ok(Message::Response { body, .. })) =
-        Request::to(("our", "http_client", "distro", "sys"))
-            .body(
-                serde_json::to_vec(&http::HttpClientAction::WebSocketOpen {
-                    url: url.clone(),
-                    headers: headers.unwrap_or(HashMap::new()),
-                    channel_id,
-                })
-                .unwrap(),
-            )
-            .inherit(false)
-            .send_and_await_response(5)
-    else {
-        return Err(http::HttpClientError::WsOpenFailed { url });
-    };
-    match serde_json::from_slice(&body) {
-        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        _ => Err(http::HttpClientError::WsOpenFailed { url }),
-    }
-}
-
-pub fn close_ws_connection(channel_id: u32) -> std::result::Result<(), http::HttpClientError> {
-    let Ok(Ok(Message::Response { body, .. })) =
-        Request::to(("our", "http_client", "distro", "sys"))
-            .body(
-                serde_json::json!(http::HttpClientAction::WebSocketClose { channel_id })
-                    .to_string()
-                    .as_bytes()
-                    .to_vec(),
-            )
-            .inherit(false)
-            .send_and_await_response(5)
-    else {
-        return Err(http::HttpClientError::WsCloseFailed { channel_id });
-    };
-    match serde_json::from_slice(&body) {
-        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        _ => Err(http::HttpClientError::WsCloseFailed { channel_id }),
-    }
-}
-
-pub fn send_request_await_response(
-    method: http::Method,
-    url: url::Url,
-    headers: Option<HashMap<String, String>>,
-    timeout: u64,
-    body: Vec<u8>,
-    inherit: bool,
-) -> std::result::Result<http::Response<Vec<u8>>, http::HttpClientError> {
-    let res = Request::to(("our", "http_client", "distro", "sys"))
-        .body(
-            serde_json::to_vec(&http::HttpClientAction::Http(http::OutgoingHttpRequest {
-                method: method.to_string(),
-                version: None,
-                url: url.to_string(),
-                headers: headers.unwrap_or_default(),
-            }))
-            .map_err(|e| http::HttpClientError::BadRequest {
-                req: format!("{e:?}"),
-            })?,
-        )
-        .blob_bytes(body)
-        .inherit(inherit)
-        .send_and_await_response(timeout)
-        .map_err(|e| http::HttpClientError::RequestFailed { error: format!("{}", e) } )?;
-    let Ok(Message::Response { body, .. }) = res else {
-        return Err(http::HttpClientError::RequestFailed {
-            error: "http_client timed out".to_string(),
-        });
-    };
-    let resp = match serde_json::from_slice::<
-        std::result::Result<http::HttpClientResponse, http::HttpClientError>,
-    >(&body)
-    {
-        Ok(Ok(http::HttpClientResponse::Http(resp))) => resp,
-        Ok(Ok(http::HttpClientResponse::WebSocketAck)) => {
-            return Err(http::HttpClientError::RequestFailed {
-                error: "http_client gave unexpected response".to_string(),
-            })
-        }
-        Ok(Err(e)) => return Err(e),
-        Err(e) => {
-            return Err(http::HttpClientError::RequestFailed {
-                error: format!("http_client gave invalid response: {e:?}"),
-            })
-        }
-    };
-    let mut http_response = http::Response::builder()
-        .status(http::StatusCode::from_u16(resp.status).unwrap_or_default());
-    let headers = http_response.headers_mut().unwrap();
-    for (key, value) in &resp.headers {
-        let Ok(key) = http::header::HeaderName::from_str(key) else {
-            return Err(http::HttpClientError::RequestFailed {
-                error: format!("http_client gave invalid header key: {key}"),
-            });
-        };
-        let Ok(value) = http::header::HeaderValue::from_str(value) else {
-            return Err(http::HttpClientError::RequestFailed {
-                error: format!("http_client gave invalid header value: {value}"),
-            });
-        };
-        headers.insert(key, value);
-    }
-    Ok(http_response
-        .body(get_blob().unwrap_or_default().bytes)
-        .unwrap())
-}
-
 // fn fetch_chain_state(state: &mut State) -> anyhow::Result<()> {
 //     let Some(rollup_sequencer) = state.rollup_sequencer.clone() else {
 //         return Err(anyhow::anyhow!("fetch_chain_state rollup_sequencer must be set before chain state can be fetched"));
@@ -830,17 +728,20 @@ fn handle_admin_request(
 ) -> anyhow::Result<()> {
     let source = message.source();
     if source.node() != our.node() {
+        if serde_json::from_slice::<AdminRequest>(message.body()).is_err() {
+            return Err(NotAMatchError::NotAMatch.into());
+        }
         return Err(anyhow::anyhow!("only our can make AdminRequests; rejecting from {source:?}"));
     }
-    match serde_json::from_slice(message.body())? {
-        AdminRequest::SetRouterProcess { process_id } => {
+    match serde_json::from_slice(message.body()) {
+        Ok(AdminRequest::SetRouterProcess { process_id }) => {
             let process_id = process_id.parse()?;
             state.router_process = Some(process_id);
             Response::new()
                 .body(serde_json::to_vec(&AdminResponse::SetRouterProcess { err: None })?)
                 .send()?;
         }
-        AdminRequest::SetRollupSequencer { address } => {
+        Ok(AdminRequest::SetRollupSequencer { address }) => {
             let address = address.parse()?;
             state.rollup_sequencer = Some(address);
             await_chain_state(state)?;
@@ -848,7 +749,7 @@ fn handle_admin_request(
                 .body(serde_json::to_vec(&AdminResponse::SetRollupSequencer { err: None })?)
                 .send()?;
         }
-        AdminRequest::SetIsReady { is_ready } => {
+        Ok(AdminRequest::SetIsReady { is_ready }) => {
             state.is_ready = is_ready;
             let address = Address::new(
                 state.on_chain_state.routers[0].clone(),
@@ -861,13 +762,16 @@ fn handle_admin_request(
                 .body(serde_json::to_vec(&AdminResponse::SetIsReady)?)
                 .send()?;
         }
-        AdminRequest::SetComfyUi { host, port, client_id } => {
+        Ok(AdminRequest::SetComfyUi { host, port, client_id }) => {
             state.comfyui_host = host;
             state.comfyui_port = port;
             state.comfyui_client_id = client_id;
             Response::new()
                 .body(serde_json::to_vec(&AdminResponse::SetComfyUi)?)
                 .send()?;
+        }
+        Err(_e) => {
+            return Err(NotAMatchError::NotAMatch.into());
         }
     }
     state.save()?;
@@ -885,11 +789,9 @@ fn handle_member_request(
     let source = message.source();
     if !state.on_chain_state.routers.contains(&source.node().to_string()) {
         if source.node() == our.node() {
-            // handle extra WS messages;
-            // these are being removed (they are sent post-close);
-            // TODO: remove this after fix is in
+            // handle extra WS messages: Close & queued up before close finished
             if let Ok(_req) = serde_json::from_slice::<http::HttpClientRequest>(message.body()) {
-                return Err(anyhow::anyhow!("this is a hack"));
+                return Err(ExtraWsMessageError::ExtraWsMessage.into());
             }
         }
         return Err(anyhow::anyhow!(
@@ -898,19 +800,19 @@ fn handle_member_request(
         ));
     }
     let is_ready = state.is_ready.clone();
-    match serde_json::from_slice(message.body())? {
-        MemberRequest::QueryReady => {
+    match serde_json::from_slice(message.body()) {
+        Ok(MemberRequest::QueryReady) => {
             Response::new()
                 .body(serde_json::to_vec(&MemberResponse::QueryReady { is_ready })?)
                 .send()?;
         }
-        MemberRequest::JobTaken { .. } => {
+        Ok(MemberRequest::JobTaken { .. }) => {
             // Ack
             Response::new()
                 .body(serde_json::to_vec(&MemberResponse::JobTaken)?)
                 .send()?;
         }
-        MemberRequest::ServeJob { job_id, ref seed, ref workflow, ref parameters } => {
+        Ok(MemberRequest::ServeJob { job_id, ref seed, ref workflow, ref parameters }) => {
             Response::new() // TODO
                 .body(serde_json::to_vec(&MemberResponse::ServeJob)?)
                 .send()?;
@@ -936,8 +838,11 @@ fn handle_member_request(
                 &image_done_node_id,
             )?;
         }
-        MemberRequest::SetIsReady { .. } | MemberRequest::JobUpdate { .. } => {
+        Ok(MemberRequest::SetIsReady { .. }) | Ok(MemberRequest::JobUpdate { .. }) => {
             return Err(anyhow::anyhow!("unexpected MemberRequest"));
+        }
+        Err(_e) => {
+            return Err(NotAMatchError::NotAMatch.into());
         }
     }
     Ok(())
@@ -947,10 +852,13 @@ fn handle_member_request(
 fn handle_member_response(
     message: &Message,
 ) -> anyhow::Result<()> {
-    match serde_json::from_slice(message.body())? {
-        MemberResponse::SetIsReady | MemberResponse::QueryReady { .. } | MemberResponse::JobUpdate => {}
-        MemberResponse::ServeJob { .. } | MemberResponse::JobTaken => {
+    match serde_json::from_slice(message.body()) {
+        Ok(MemberResponse::SetIsReady) | Ok(MemberResponse::QueryReady { .. }) | Ok(MemberResponse::JobUpdate) => {}
+        Ok(MemberResponse::ServeJob { .. }) | Ok(MemberResponse::JobTaken) => {
             return Err(anyhow::anyhow!("unexpected MemberResponse"));
+        }
+        Err(_e) => {
+            return Err(NotAMatchError::NotAMatch.into());
         }
     }
     Ok(())
@@ -977,15 +885,15 @@ fn handle_message(
     images_dir: &str,
 ) -> anyhow::Result<()> {
     if message.is_request() {
-        if handle_admin_request(our, &message, state).is_ok() {
-            return Ok(());
+        match handle_admin_request(our, message, state) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if e.downcast_ref::<NotAMatchError>().is_none() {
+                    return Err(e);
+                }
+            }
         }
-        if state.router_process.is_none() {
-            return Err(anyhow::anyhow!(
-                "provider package must be set by AdminRequest before accepting other Requests"
-            ));
-        }
-        return handle_member_request(our, &message, state, workflows_dir, data_dir, images_dir);
+        return handle_member_request(our, message, state, workflows_dir, data_dir, images_dir);
     }
 
     if handle_sequencer_response(state).is_ok() {
@@ -999,8 +907,6 @@ fn handle_message(
 call_init!(init);
 fn init(our: Address) {
     println!("{}: begin", our.process());
-
-    let _ = http::close_ws_connection(DEFAULT_COMFYUI_CLIENT_ID);
 
     let workflows_dir = vfs::create_drive(our.package_id(), "workflows", None).unwrap();
     let data_dir = vfs::create_drive(our.package_id(), "data", None).unwrap();
@@ -1023,14 +929,10 @@ fn init(our: Address) {
         ) {
             Ok(()) => {}
             Err(e) => {
-                // handle extra WS messages;
-                // these are being removed (they are sent post-close);
-                // TODO: remove this after fix is in
-                if e.to_string() == "this is a hack".to_string() {
-                    continue;
+                // handle extra WS messages: Close & queued up before close finished
+                if e.downcast_ref::<ExtraWsMessageError>().is_none() {
+                    println!("{}: error: {:?}", our.process(), e);
                 }
-
-                println!("{}: error: {:?}", our.process(), e);
             }
         };
     }
